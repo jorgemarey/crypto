@@ -6,6 +6,7 @@ package ssh
 
 import (
 	"bytes"
+	"encoding/asn1"
 	"errors"
 	"fmt"
 	"io"
@@ -483,4 +484,188 @@ func (r *retryableAuthMethod) method() string {
 // (and so the user would never be able to retry their entry).
 func RetryableAuthMethod(auth AuthMethod, maxTries int) AuthMethod {
 	return &retryableAuthMethod{authMethod: auth, maxTries: maxTries}
+}
+
+// GSSAPIWithMic returns an AuthMethod that will perform an gssapi-with-mic authentication
+func GSSAPIWithMic(client GSSAPIClient) AuthMethod {
+	return gssapiWithMicCallback{GSSAPIClient: client}
+}
+
+// GSSAPIClient set the needed methods to implement by an client for GSSAPI on ssh
+type GSSAPIClient interface {
+	GetToken(mech, user, srvToken string) (token string, err error)
+	GetMicToken(msg []byte) (micToken string, err error)
+}
+
+// gssapiWithMicCallback is an AuthMethod that uses kerberos
+// for authentication.
+type gssapiWithMicCallback struct {
+	GSSAPIClient
+}
+
+func (cb gssapiWithMicCallback) auth(session []byte, user string, c packetConn, rand io.Reader) (bool, []string, error) {
+	type gssapiWithMicMsg struct {
+		User    string `sshtype:"50"`
+		Service string
+		Method  string
+		N       uint32
+		OIDs    []string
+	}
+
+	// OpenSSH supports Kerberos V5 mechanism only for GSS-API authentication, so we also support the krb5 mechanism only.
+	krb5OID, _ := asn1.Marshal(asn1.ObjectIdentifier{1, 2, 840, 113554, 1, 2, 2})
+
+	if err := c.writePacket(Marshal(&gssapiWithMicMsg{
+		User:    user,
+		Service: serviceSSH,
+		Method:  cb.method(),
+		N:       1,
+		OIDs:    []string{string(krb5OID)},
+	})); err != nil {
+		return false, nil, err
+	}
+
+	mech := ""
+	token := ""
+	for {
+		packet, err := c.readPacket()
+		if err != nil {
+			return false, nil, err
+		}
+		switch packet[0] {
+		case msgUserAuthBanner:
+			// TODO: add callback to present the banner to the user
+		case msgUserAuthGssapiResponse:
+			var msg userAuthGssapiResponseMsg
+			if err := Unmarshal(packet, &msg); err != nil {
+				return false, nil, err
+			}
+			mech = msg.SelectedMechOID
+
+			if token, err = cb.GetToken(mech, user, ""); err != nil {
+				return false, nil, err
+			}
+			if err := c.writePacket(Marshal(&userAuthGssapiTokenMsg{
+				Token: token,
+			})); err != nil {
+				return false, nil, err
+			}
+		case msgUserAuthGssapiToken:
+			var msg userAuthGssapiTokenMsg
+			if err := Unmarshal(packet, &msg); err != nil {
+				return false, nil, err
+			}
+			srvToken := msg.Token
+			if token, err = cb.GetToken(mech, user, srvToken); err != nil {
+				return false, nil, err
+			}
+			if token != "" {
+				if err := c.writePacket(Marshal(&userAuthGssapiTokenMsg{
+					Token: token,
+				})); err != nil {
+					return false, nil, err
+				}
+			}
+			// TODO: if GSS_Complete
+			micToken, err := cb.GetMicToken(buildMic(session, user, serviceSSH, cb.method()))
+			if err != nil {
+				return false, nil, err
+			}
+			if err := c.writePacket(Marshal(&userAuthGssapiMicMsg{
+				Mic: micToken,
+			})); err != nil {
+				return false, nil, err
+			}
+		case msgUserAuthSuccess:
+			return true, nil, nil
+		case msgUserAuthFailure:
+			var msg userAuthFailureMsg
+			if err := Unmarshal(packet, &msg); err != nil {
+				return false, nil, err
+			}
+			return false, msg.Methods, nil
+		default:
+			return false, nil, unexpectedMessageError(msgUserAuthSuccess, packet[0])
+		}
+	}
+}
+
+func (cb gssapiWithMicCallback) method() string {
+	return "gssapi-with-mic"
+}
+
+// GSSAPIKeyex returns an auth method that tries to perform an gssapi-keyex authentication
+func GSSAPIKeyex(callback GssapiKeyexCallback) AuthMethod {
+	return callback
+}
+
+// GssapiKeyexCallback is an AuthMethod that uses kerberos
+// for authentication.
+type GssapiKeyexCallback func(msg []byte) (micToken string, err error)
+
+func (cb GssapiKeyexCallback) auth(session []byte, user string, c packetConn, rand io.Reader) (bool, []string, error) {
+	type gssapiKeyexMsg struct {
+		User    string `sshtype:"50"`
+		Service string
+		Method  string
+		Mic     string
+	}
+
+	micToken, err := cb(buildMic(session, user, serviceSSH, cb.method()))
+	if err != nil {
+		return false, nil, err
+	}
+
+	if err := c.writePacket(Marshal(&gssapiKeyexMsg{
+		User:    user,
+		Service: serviceSSH,
+		Method:  cb.method(),
+		Mic:     micToken,
+	})); err != nil {
+		return false, nil, err
+	}
+
+	for {
+		packet, err := c.readPacket()
+		if err != nil {
+			return false, nil, err
+		}
+
+		switch packet[0] {
+		case msgUserAuthBanner:
+			// TODO: add callback to present the banner to the user
+		case msgUserAuthSuccess:
+			return true, nil, nil
+		case msgUserAuthFailure:
+			var msg userAuthFailureMsg
+			if err := Unmarshal(packet, &msg); err != nil {
+				return false, nil, err
+			}
+			return false, msg.Methods, nil
+		default:
+			return false, nil, unexpectedMessageError(msgUserAuthSuccess, packet[0])
+		}
+	}
+}
+
+func (cb GssapiKeyexCallback) method() string {
+	return "gssapi-keyex"
+}
+
+func buildMic(session []byte, user, service, authMethod string) []byte {
+	type mic struct {
+		SessionID string
+		MsgType   byte
+		User      string
+		Service   string
+		Method    string
+	}
+
+	return Marshal(&mic{
+		SessionID: string(session),
+		MsgType:   msgUserAuthRequest,
+		User:      user,
+		Service:   service,
+		Method:    authMethod,
+	})
 }

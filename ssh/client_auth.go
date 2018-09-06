@@ -542,7 +542,7 @@ type gssapiWithMicCallback struct {
 	GSSAPIClient
 }
 
-func (cb gssapiWithMicCallback) auth(session []byte, user string, c packetConn, rand io.Reader) (bool, []string, error) {
+func (cb gssapiWithMicCallback) auth(session []byte, user string, c packetConn, rand io.Reader) (authResult, []string, error) {
 	type gssapiWithMicMsg struct {
 		User    string `sshtype:"50"`
 		Service string
@@ -561,7 +561,7 @@ func (cb gssapiWithMicCallback) auth(session []byte, user string, c packetConn, 
 		N:       1,
 		OIDs:    []string{string(krb5OID)},
 	})); err != nil {
-		return false, nil, err
+		return authFailure, nil, err
 	}
 
 	mech := ""
@@ -569,7 +569,7 @@ func (cb gssapiWithMicCallback) auth(session []byte, user string, c packetConn, 
 	for {
 		packet, err := c.readPacket()
 		if err != nil {
-			return false, nil, err
+			return authFailure, nil, err
 		}
 		switch packet[0] {
 		case msgUserAuthBanner:
@@ -577,54 +577,54 @@ func (cb gssapiWithMicCallback) auth(session []byte, user string, c packetConn, 
 		case msgUserAuthGssapiResponse:
 			var msg userAuthGssapiResponseMsg
 			if err := Unmarshal(packet, &msg); err != nil {
-				return false, nil, err
+				return authFailure, nil, err
 			}
 			mech = msg.SelectedMechOID
 
 			if token, err = cb.GetToken(mech, user, ""); err != nil {
-				return false, nil, err
+				return authFailure, nil, err
 			}
 			if err := c.writePacket(Marshal(&userAuthGssapiTokenMsg{
 				Token: token,
 			})); err != nil {
-				return false, nil, err
+				return authFailure, nil, err
 			}
 		case msgUserAuthGssapiToken:
 			var msg userAuthGssapiTokenMsg
 			if err := Unmarshal(packet, &msg); err != nil {
-				return false, nil, err
+				return authFailure, nil, err
 			}
 			srvToken := msg.Token
 			if token, err = cb.GetToken(mech, user, srvToken); err != nil {
-				return false, nil, err
+				return authFailure, nil, err
 			}
 			if token != "" {
 				if err := c.writePacket(Marshal(&userAuthGssapiTokenMsg{
 					Token: token,
 				})); err != nil {
-					return false, nil, err
+					return authFailure, nil, err
 				}
 			}
 			// TODO: if GSS_Complete
 			micToken, err := cb.GetMicToken(buildMic(session, user, serviceSSH, cb.method()))
 			if err != nil {
-				return false, nil, err
+				return authFailure, nil, err
 			}
 			if err := c.writePacket(Marshal(&userAuthGssapiMicMsg{
 				Mic: micToken,
 			})); err != nil {
-				return false, nil, err
+				return authFailure, nil, err
 			}
 		case msgUserAuthSuccess:
-			return true, nil, nil
+			return authSuccess, nil, nil
 		case msgUserAuthFailure:
 			var msg userAuthFailureMsg
 			if err := Unmarshal(packet, &msg); err != nil {
-				return false, nil, err
+				return authFailure, nil, err
 			}
-			return false, msg.Methods, nil
+			return authFailure, msg.Methods, nil
 		default:
-			return false, nil, unexpectedMessageError(msgUserAuthSuccess, packet[0])
+			return authFailure, nil, unexpectedMessageError(msgUserAuthSuccess, packet[0])
 		}
 	}
 }
@@ -642,7 +642,7 @@ func GSSAPIKeyex(callback GssapiKeyexCallback) AuthMethod {
 // for authentication.
 type GssapiKeyexCallback func(msg []byte) (micToken string, err error)
 
-func (cb GssapiKeyexCallback) auth(session []byte, user string, c packetConn, rand io.Reader) (bool, []string, error) {
+func (cb GssapiKeyexCallback) auth(session []byte, user string, c packetConn, rand io.Reader) (authResult, []string, error) {
 	type gssapiKeyexMsg struct {
 		User    string `sshtype:"50"`
 		Service string
@@ -652,7 +652,7 @@ func (cb GssapiKeyexCallback) auth(session []byte, user string, c packetConn, ra
 
 	micToken, err := cb(buildMic(session, user, serviceSSH, cb.method()))
 	if err != nil {
-		return false, nil, err
+		return authFailure, nil, err
 	}
 
 	if err := c.writePacket(Marshal(&gssapiKeyexMsg{
@@ -661,28 +661,28 @@ func (cb GssapiKeyexCallback) auth(session []byte, user string, c packetConn, ra
 		Method:  cb.method(),
 		Mic:     micToken,
 	})); err != nil {
-		return false, nil, err
+		return authFailure, nil, err
 	}
 
 	for {
 		packet, err := c.readPacket()
 		if err != nil {
-			return false, nil, err
+			return authFailure, nil, err
 		}
 
 		switch packet[0] {
 		case msgUserAuthBanner:
 			// TODO: add callback to present the banner to the user
 		case msgUserAuthSuccess:
-			return true, nil, nil
+			return authSuccess, nil, nil
 		case msgUserAuthFailure:
 			var msg userAuthFailureMsg
 			if err := Unmarshal(packet, &msg); err != nil {
-				return false, nil, err
+				return authFailure, nil, err
 			}
-			return false, msg.Methods, nil
+			return authFailure, msg.Methods, nil
 		default:
-			return false, nil, unexpectedMessageError(msgUserAuthSuccess, packet[0])
+			return authFailure, nil, unexpectedMessageError(msgUserAuthSuccess, packet[0])
 		}
 	}
 }

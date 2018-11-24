@@ -85,6 +85,14 @@ type ServerConfig struct {
 	// unknown.
 	KeyboardInteractiveCallback func(conn ConnMetadata, client KeyboardInteractiveChallenge) (*Permissions, error)
 
+	// NextAuthMethodsCallback, if non-nil, is called each time the server
+	// replies with available authentication methods. Typically, this is
+	// called when an authentication request has failed.
+	//
+	// A PartialSuccess flag should be set to indicate
+	// a multi-step authentication process.
+	NextAuthMethodsCallback func(conn ConnMetadata) ([]string, bool, error)
+
 	// AuthLogCallback, if non-nil, is called to log all authentication
 	// attempts.
 	AuthLogCallback func(conn ConnMetadata, method string, err error)
@@ -512,14 +520,23 @@ userAuthLoop:
 		authFailures++
 
 		var failureMsg userAuthFailureMsg
-		if config.PasswordCallback != nil {
-			failureMsg.Methods = append(failureMsg.Methods, "password")
-		}
-		if config.PublicKeyCallback != nil {
-			failureMsg.Methods = append(failureMsg.Methods, "publickey")
-		}
-		if config.KeyboardInteractiveCallback != nil {
-			failureMsg.Methods = append(failureMsg.Methods, "keyboard-interactive")
+		if config.NextAuthMethodsCallback != nil {
+			methods, partial, err := config.NextAuthMethodsCallback(s)
+			if err != nil {
+				return nil, err
+			}
+			failureMsg.Methods = methods
+			failureMsg.PartialSuccess = partial
+		} else {
+			if config.PasswordCallback != nil {
+				failureMsg.Methods = append(failureMsg.Methods, "password")
+			}
+			if config.PublicKeyCallback != nil {
+				failureMsg.Methods = append(failureMsg.Methods, "publickey")
+			}
+			if config.KeyboardInteractiveCallback != nil {
+				failureMsg.Methods = append(failureMsg.Methods, "keyboard-interactive")
+			}
 		}
 
 		if len(failureMsg.Methods) == 0 {

@@ -275,6 +275,39 @@ type userAuthPubKeyOkMsg struct {
 	PubKey []byte
 }
 
+// See RFC 4462, section 6
+const (
+	msgUserAuthGssapiResponse         = 60
+	msgUserAuthGssapiToken            = 61
+	msgUserAuthGssapiExchangeComplete = 63
+	msgUserAuthGssapiError            = 64
+	msgUserAuthGssapiErrtok           = 65
+	msgUserAuthGssapiMic              = 66
+)
+
+type userAuthGssapiResponseMsg struct {
+	SelectedMechOID string `sshtype:"60"`
+}
+
+type userAuthGssapiTokenMsg struct {
+	Token string `sshtype:"61"`
+}
+
+type userAuthGssapiErrorMsg struct {
+	MajorStatus uint32 `sshtype:"64"`
+	MinorStatus uint32
+	Message     string
+	LanguageTag string
+}
+
+type userAuthGssapiErrtokMsg struct {
+	ErrToken string `sshtype:"65"`
+}
+
+type userAuthGssapiMicMsg struct {
+	Mic string `sshtype:"66"`
+}
+
 // typeTags returns the possible type bytes for the given reflect.Type, which
 // should be a struct. The possible values are separated by a '|' character.
 func typeTags(structType reflect.Type) (tags []byte) {
